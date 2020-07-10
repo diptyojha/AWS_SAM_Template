@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Resource definitions for job-flight-processor
+
+Parameters: 
+  LogAccount: 
+    Type: String
+    Default: "712236090993"
+    Description: Enter the log account to share access to analytics data.
+
+Globals: 
+    Function:
+      Runtime: python3.8 
+      Timeout: 10 
+      Environment:
+          Variables: 
+              REGION_NAME: ap-southeast-1
+              DDB_TABLE:  !Ref flightSearchTabletest
+              FIREHOSE_STREAM: !Ref AnalyticStream
+
+Resources:
+# S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    
+# Dynamo DB
+  flightSearchTabletest:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S   
+        - AttributeName: flightNumber
+          AttributeType: S   
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: flightNumber
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification: 
+        AttributeName: expires
+        Enabled: true
+
+  # Lambda Function
+  FlightProcessorFunctiontest:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: flight-processor/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Timeout: 60
+      MemorySize: 256
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:GetObject'
+                - 's3:PutObject'
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - 'dynamodb:*'
+              Resource: !GetAtt flightSearchTabletest.Arn 
+            - Effect: Allow
+              Action:
+                - 'firehose:*'
+              Resource: !GetAtt AnalyticStream.Arn 
+      Events:
+          Trigger:
+              Type: S3
+              Properties:
+                  Bucket: !Ref S3Buckettest
+                  Events: s3:ObjectCreated:*
+
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt FlightProcessorFunctiontest.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 's3.amazonaws.com'
+      SourceAccount: !Sub ${AWS::AccountId}
+      SourceArn: !GetAtt S3Buckettest.Arn
+
+  AnalyticBucket:
+    Type: AWS::S3::Bucket
+  AnalyticBucketPolicy:  
+      Type: 'AWS::S3::BucketPolicy'  
+      Properties:  
+        Bucket: !Ref AnalyticBucket 
+        PolicyDocument:  
+          Statement:
+            - Sid: "AllowLoggingAccount"  
+              Action:
+                - s3:GetObject
+                - s3:ListBucket
+              Effect: "Allow"  
+              Principal:
+                AWS: !Join ["", ["arn:aws:iam::", !Ref LogAccount, ":root" ]]
+              Resource:
+                - !Join ["", ["arn:aws:s3:::", !Ref AnalyticBucket, "/*" ]]
+                - !Join ["", ["arn:aws:s3:::", !Ref AnalyticBucket]]
+
+  AnalyticStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration: 
+        BucketARN: !GetAtt AnalyticBucket.Arn
+        CompressionFormat: GZIP
+        ErrorOutputPrefix: errors/
+        Prefix: raw/
+        RoleARN: !GetAtt AnalyticStreamRole.Arn
+        BufferingHints: 
+          IntervalInSeconds: 900
+          SizeInMBs: 128
+        ProcessingConfiguration:
+          Enabled: 'false'
+
+  AnalyticStreamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Description: Role for the search analytic logging.
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - firehose.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource:
+                  - !GetAtt AnalyticBucket.Arn
+                  - !Join ["/", [!GetAtt AnalyticBucket.Arn, "*"]]
+
+Outputs:
+ S3Bucket:
+   Description: " Hello from S3Bucket ARN"
+   Value: !GetAtt S3Buckettest.Arn 
+ flightSearchTable:
+   Description: " Hello from flightSearchTable ARN"
+   Value: !GetAtt flightSearchTabletest.Arn
